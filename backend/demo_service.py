@@ -32,13 +32,9 @@ async def _tts(text: str, path: str, voice: str = "en-US-AriaNeural") -> bool:
 
 
 async def _plan_actions(url: str, description: str, voiceover: str) -> dict:
-    import google.generativeai as genai  # type: ignore
+    from google import genai  # type: ignore
 
-    genai.configure(api_key=os.getenv("GOOGLE_API_KEY", ""))
-    model = genai.GenerativeModel(
-        "gemini-1.5-flash",
-        generation_config=genai.GenerationConfig(response_mime_type="application/json"),
-    )
+    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY", ""))
 
     prompt = f"""You are generating a Playwright browser automation script for a screen recording demo video.
 Return ONLY valid JSON.
@@ -68,7 +64,12 @@ Rules:
 - caption_segments start at 0, align with voiceover
 - Keep total under 90 seconds"""
 
-    resp = await asyncio.to_thread(model.generate_content, prompt)
+    resp = await asyncio.to_thread(
+        client.models.generate_content,
+        model="gemini-2.0-flash",
+        contents=prompt,
+        config={"response_mime_type": "application/json"},
+    )
     return json.loads(resp.text)
 
 

@@ -132,16 +132,9 @@ def generate_copy(body: CopyRequest) -> JSONResponse:
     if not api_key:
         return _error(503, "Google API key not configured — add GOOGLE_API_KEY to your .env")
 
-    import google.generativeai as genai  # type: ignore
+    from google import genai  # type: ignore
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        "gemini-1.5-flash",
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-            temperature=0.85,
-        ),
-    )
+    client = genai.Client(api_key=api_key)
 
     prompt = f"""You are an expert ad copywriter. Create ad copy for this product and return ONLY valid JSON.
 
@@ -162,7 +155,11 @@ Return a JSON object with exactly these keys:
 """
 
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+            config={"response_mime_type": "application/json", "temperature": 0.85},
+        )
         data = json.loads(response.text)
         return JSONResponse(content=data)
     except Exception as exc:
