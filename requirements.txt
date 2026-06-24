@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 pydantic
 httpx
-google-genai
+groq
 playwright
 edge-tts
 python-jose[cryptography]

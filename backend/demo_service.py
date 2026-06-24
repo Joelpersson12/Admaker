@@ -32,9 +32,9 @@ async def _tts(text: str, path: str, voice: str = "en-US-AriaNeural") -> bool:
 
 
 async def _plan_actions(url: str, description: str, voiceover: str) -> dict:
-    from google import genai  # type: ignore
+    from groq import Groq
 
-    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY", ""))
+    client = Groq(api_key=os.getenv("GROQ_API_KEY", ""))
 
     prompt = f"""You are generating a Playwright browser automation script for a screen recording demo video.
 Return ONLY valid JSON.
@@ -65,12 +65,13 @@ Rules:
 - Keep total under 90 seconds"""
 
     resp = await asyncio.to_thread(
-        client.models.generate_content,
-        model="gemini-2.0-flash",
-        contents=prompt,
-        config={"response_mime_type": "application/json"},
+        client.chat.completions.create,
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        max_tokens=1500,
     )
-    return json.loads(resp.text)
+    return json.loads(resp.choices[0].message.content or "{}")
 
 
 async def _record(page, frames_dir: Path, duration_ms: int, frame_state: list) -> None:

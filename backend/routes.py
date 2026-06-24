@@ -10,6 +10,8 @@ from fastapi import APIRouter, Header
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
+from groq import Groq
+
 from backend.auth_service import get_user, login, register, verify_token
 from backend.video_service import (
     build_video_prompt,
@@ -116,7 +118,7 @@ def auth_me(authorization: str | None = Header(default=None)) -> JSONResponse:
 @router.get("/api/config")
 def config() -> dict:
     return {
-        "copy_enabled": bool(os.environ.get("GOOGLE_API_KEY", "")),
+        "copy_enabled": bool(os.environ.get("GROQ_API_KEY", "")),
         "video_enabled": has_fal_key(),
     }
 
@@ -128,13 +130,11 @@ def config() -> dict:
 
 @router.post("/api/generate-copy")
 def generate_copy(body: CopyRequest) -> JSONResponse:
-    api_key = os.environ.get("GOOGLE_API_KEY", "")
+    api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
-        return _error(503, "Google API key not configured — add GOOGLE_API_KEY to your .env")
+        return _error(503, "Groq API key not configured — add GROQ_API_KEY in HF Spaces → Settings → Secrets")
 
-    from google import genai  # type: ignore
-
-    client = genai.Client(api_key=api_key)
+    client = Groq(api_key=api_key)
 
     prompt = f"""You are an expert ad copywriter. Create ad copy for this product and return ONLY valid JSON.
 
@@ -154,35 +154,23 @@ Return a JSON object with exactly these keys:
 - hook: one ultra-short opening line for a video reel (max 10 words, surprising or provocative)
 """
 
-    import re
-
-    for model_name in ("gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"):
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-            )
-            text = response.text.strip()
-            # Strip markdown code fences if present
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text)
-            data = json.loads(text)
-            logger.info("generate_copy success with model %s", model_name)
-            return JSONResponse(content=data)
-        except json.JSONDecodeError as exc:
-            logger.error("generate_copy JSON parse error (%s): %s", model_name, exc)
-            return _error(500, f"AI returned invalid JSON: {exc}")
-        except Exception as exc:
-            exc_str = str(exc)
-            logger.error("generate_copy error (%s): %s", model_name, exc_str)
-            if "not found" in exc_str.lower() or "404" in exc_str or "429" in exc_str or "quota" in exc_str.lower() or "resource_exhausted" in exc_str.lower():
-                continue  # try next model
-            return _error(500, exc_str)
-    return _error(
-        503,
-        "Gemini API quota exceeded or unavailable. "
-        "Get a free API key at aistudio.google.com, then add it as GOOGLE_API_KEY in HF Spaces → Settings → Secrets.",
-    )
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.85,
+            max_tokens=800,
+        )
+        data = json.loads(response.choices[0].message.content or "{}")
+        logger.info("generate_copy success")
+        return JSONResponse(content=data)
+    except json.JSONDecodeError as exc:
+        logger.error("generate_copy JSON parse error: %s", exc)
+        return _error(500, f"AI returned invalid JSON: {exc}")
+    except Exception as exc:
+        logger.error("generate_copy error: %s", exc)
+        return _error(500, str(exc))
 
 
 # ---------------------------------------------------------------------------
