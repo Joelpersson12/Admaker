@@ -32,13 +32,20 @@ async def _tts(text: str, path: str, voice: str = "en-US-AriaNeural") -> bool:
 
 
 async def _plan_actions(url: str, description: str, voiceover: str) -> dict:
-    import openai
-    client = openai.AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    import google.generativeai as genai  # type: ignore
+
+    genai.configure(api_key=os.getenv("GOOGLE_API_KEY", ""))
+    model = genai.GenerativeModel(
+        "gemini-1.5-flash",
+        generation_config=genai.GenerationConfig(response_mime_type="application/json"),
+    )
+
     prompt = f"""You are generating a Playwright browser automation script for a screen recording demo video.
+Return ONLY valid JSON.
 
 Website URL: {url}
 What to demonstrate: {description}
-Voiceover script (will be spoken over the video): {voiceover}
+Voiceover script: {voiceover}
 
 Return a JSON object with:
 - "actions": array of step objects
@@ -56,21 +63,13 @@ Supported action types:
   {{"type":"press","key":"Enter","wait_ms":3000}}
 
 Rules:
-- Always start with a navigate action
+- Always start with navigate
 - Use generous wait_ms for page loads (2500+) and AI generation (8000+)
-- caption_segments should align roughly with the voiceover, start at 0
-- Keep total under 90 seconds
-- Use click_text for links/buttons when you know the label
-- Use fill_placeholder for search or prompt fields
+- caption_segments start at 0, align with voiceover
+- Keep total under 90 seconds"""
 
-Return ONLY valid JSON."""
-
-    resp = await client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-    )
-    return json.loads(resp.choices[0].message.content)
+    resp = await asyncio.to_thread(model.generate_content, prompt)
+    return json.loads(resp.text)
 
 
 async def _record(page, frames_dir: Path, duration_ms: int, frame_state: list) -> None:

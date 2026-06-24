@@ -120,7 +120,7 @@ export default function Step2GenerateCopy({ productInfo, onBack, onNext }: Props
           <span className="text-red-400 text-lg">!</span>
         </div>
         <p className="text-red-400 font-medium">{error}</p>
-        <p className="text-white/35 text-sm">Make sure your OPENAI_API_KEY is set in the backend .env</p>
+        <p className="text-white/35 text-sm">Make sure your GOOGLE_API_KEY is set in HF Spaces → Settings → Secrets</p>
         <div className="flex gap-3 mt-2">
           <button onClick={onBack} className="btn-ghost px-5 py-2 text-sm">← Back</button>
           <button onClick={generate} className="btn-primary px-5 py-2 text-sm">Retry</button>

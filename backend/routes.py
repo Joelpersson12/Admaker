@@ -116,7 +116,7 @@ def auth_me(authorization: str | None = Header(default=None)) -> JSONResponse:
 @router.get("/api/config")
 def config() -> dict:
     return {
-        "copy_enabled": bool(os.environ.get("OPENAI_API_KEY", "")),
+        "copy_enabled": bool(os.environ.get("GOOGLE_API_KEY", "")),
         "video_enabled": has_fal_key(),
     }
 
@@ -128,15 +128,22 @@ def config() -> dict:
 
 @router.post("/api/generate-copy")
 def generate_copy(body: CopyRequest) -> JSONResponse:
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = os.environ.get("GOOGLE_API_KEY", "")
     if not api_key:
-        return _error(503, "OpenAI API key not configured")
+        return _error(503, "Google API key not configured — add GOOGLE_API_KEY to your .env")
 
-    from openai import OpenAI
+    import google.generativeai as genai  # type: ignore
 
-    client = OpenAI(api_key=api_key)
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        "gemini-1.5-flash",
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            temperature=0.85,
+        ),
+    )
 
-    user_prompt = f"""Create ad copy for this product:
+    prompt = f"""You are an expert ad copywriter. Create ad copy for this product and return ONLY valid JSON.
 
 Product name: {body.name}
 Description: {body.description}
@@ -155,17 +162,8 @@ Return a JSON object with exactly these keys:
 """
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are an expert ad copywriter. Return valid JSON only."},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.85,
-            max_tokens=800,
-        )
-        data = json.loads(response.choices[0].message.content or "{}")
+        response = model.generate_content(prompt)
+        data = json.loads(response.text)
         return JSONResponse(content=data)
     except Exception as exc:
         logger.error("generate_copy error: %s", exc)
