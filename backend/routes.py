@@ -154,17 +154,35 @@ Return a JSON object with exactly these keys:
 - hook: one ultra-short opening line for a video reel (max 10 words, surprising or provocative)
 """
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-            config={"response_mime_type": "application/json", "temperature": 0.85},
-        )
-        data = json.loads(response.text)
-        return JSONResponse(content=data)
-    except Exception as exc:
-        logger.error("generate_copy error: %s", exc)
-        return _error(500, f"Copy generation failed: {exc}")
+    import re
+
+    for model_name in ("gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            text = response.text.strip()
+            # Strip markdown code fences if present
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+            data = json.loads(text)
+            logger.info("generate_copy success with model %s", model_name)
+            return JSONResponse(content=data)
+        except json.JSONDecodeError as exc:
+            logger.error("generate_copy JSON parse error (%s): %s", model_name, exc)
+            return _error(500, f"AI returned invalid JSON: {exc}")
+        except Exception as exc:
+            exc_str = str(exc)
+            logger.error("generate_copy error (%s): %s", model_name, exc_str)
+            if "not found" in exc_str.lower() or "404" in exc_str or "429" in exc_str or "quota" in exc_str.lower() or "resource_exhausted" in exc_str.lower():
+                continue  # try next model
+            return _error(500, exc_str)
+    return _error(
+        503,
+        "Gemini API quota exceeded or unavailable. "
+        "Get a free API key at aistudio.google.com, then add it as GOOGLE_API_KEY in HF Spaces → Settings → Secrets.",
+    )
 
 
 # ---------------------------------------------------------------------------
