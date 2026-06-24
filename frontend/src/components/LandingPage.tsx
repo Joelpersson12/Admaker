@@ -1,9 +1,14 @@
 import { useState, useEffect } from 'react'
 import Header from './Header'
 import Footer from './Footer'
+import type { User } from '../hooks/useAuth'
 
 interface LandingPageProps {
   onStart: () => void
+  onDemo: () => void
+  user?: User | null
+  onSignIn?: () => void
+  onSignOut?: () => void
 }
 
 const DEMO_SCENES = [
@@ -176,10 +181,10 @@ function AnimatedHeroPhone() {
   )
 }
 
-export default function LandingPage({ onStart }: LandingPageProps) {
+export default function LandingPage({ onStart, onDemo, user, onSignIn, onSignOut }: LandingPageProps) {
   return (
     <div className="min-h-screen">
-      <Header onStart={onStart} />
+      <Header onStart={onStart} user={user} onSignIn={onSignIn} onSignOut={onSignOut} />
 
       {/* ── HERO ─────────────────────────────────── */}
       <section className="relative pt-32 pb-20 px-6 overflow-hidden">
@@ -212,11 +217,11 @@ export default function LandingPage({ onStart }: LandingPageProps) {
 
             <div className="flex flex-col sm:flex-row gap-3 mb-10">
               <button onClick={onStart} className="btn-primary text-sm px-7 py-3.5">
-                Create Your First Video Free →
+                Create Ad Video Free →
               </button>
-              <a href="#how-it-works" className="btn-ghost text-sm px-7 py-3.5">
-                See How It Works
-              </a>
+              <button onClick={onDemo} className="btn-ghost text-sm px-7 py-3.5">
+                🎬 Record Website Demo
+              </button>
             </div>
 
             <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs text-white/35">

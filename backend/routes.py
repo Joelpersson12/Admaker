@@ -1,4 +1,4 @@
-"""Reelix API routes — AI ad copy and AI ad video generation."""
+"""Reelix API routes — AI ad copy, AI ad video, and demo screen recording."""
 
 from __future__ import annotations
 
@@ -6,10 +6,11 @@ import json
 import logging
 import os
 
-from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Header
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
+from backend.auth_service import get_user, login, register, verify_token
 from backend.video_service import (
     build_video_prompt,
     has_fal_key,
@@ -28,9 +29,9 @@ router = APIRouter()
 
 
 class CopyRequest(BaseModel):
-    product_name: str
+    name: str
     description: str
-    target_audience: str
+    audience: str
     tone: str = "professional"
     platform: str = "instagram"
     goal: str = "sales"
@@ -48,6 +49,23 @@ class VideoRequest(BaseModel):
     duration: str = "5"
 
 
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class DemoRequest(BaseModel):
+    url: str
+    description: str
+    voiceover: str
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=status, content={"status": "error", "message": message}
@@ -55,12 +73,48 @@ def _error(status: int, message: str) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# Config — lets the frontend know which features are live
+# Auth
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/auth/register")
+def auth_register(body: RegisterRequest) -> JSONResponse:
+    try:
+        result = register(body.email, body.password, body.name)
+        return JSONResponse(content=result)
+    except ValueError as e:
+        return _error(400, str(e))
+
+
+@router.post("/api/auth/login")
+def auth_login(body: LoginRequest) -> JSONResponse:
+    try:
+        result = login(body.email, body.password)
+        return JSONResponse(content=result)
+    except ValueError as e:
+        return _error(401, str(e))
+
+
+@router.get("/api/auth/me")
+def auth_me(authorization: str | None = Header(default=None)) -> JSONResponse:
+    if not authorization or not authorization.startswith("Bearer "):
+        return _error(401, "No token")
+    payload = verify_token(authorization[7:])
+    if not payload:
+        return _error(401, "Invalid or expired token")
+    user = get_user(int(payload["sub"]))
+    if not user:
+        return _error(404, "User not found")
+    return JSONResponse(content={"user": user})
+
+
+# ---------------------------------------------------------------------------
+# Config
 # ---------------------------------------------------------------------------
 
 
 @router.get("/api/config")
-def config() -> dict[str, bool]:
+def config() -> dict:
     return {
         "copy_enabled": bool(os.environ.get("OPENAI_API_KEY", "")),
         "video_enabled": has_fal_key(),
@@ -68,13 +122,12 @@ def config() -> dict[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# AI copy generation (OpenAI)
+# AI copy generation
 # ---------------------------------------------------------------------------
 
 
 @router.post("/api/generate-copy")
 def generate_copy(body: CopyRequest) -> JSONResponse:
-    """Generate ad copy for a product using OpenAI GPT-4o."""
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         return _error(503, "OpenAI API key not configured")
@@ -83,62 +136,51 @@ def generate_copy(body: CopyRequest) -> JSONResponse:
 
     client = OpenAI(api_key=api_key)
 
-    system_prompt = (
-        "You are an expert advertising copywriter who creates high-converting "
-        "ad copy. Always return valid JSON only, no markdown, no extra text."
-    )
-    user_prompt = f"""Create ad copy for the following product:
+    user_prompt = f"""Create ad copy for this product:
 
-Product name: {body.product_name}
+Product name: {body.name}
 Description: {body.description}
-Target audience: {body.target_audience}
+Target audience: {body.audience}
 Tone: {body.tone}
 Platform: {body.platform}
 Ad goal: {body.goal}
 
 Return a JSON object with exactly these keys:
-- headlines: array of exactly 3 short, punchy headlines (max 10 words each)
-- subheadlines: array of exactly 3 supporting lines (max 20 words each)
-- ctas: array of exactly 3 call-to-action button texts (max 5 words each)
-- body_copy: one paragraph of ad body copy (40-60 words)
-- hashtags: array of exactly 8 relevant hashtags without the # symbol
-- hook: one ultra-short attention-grabbing opening line for a video reel (max 10 words, make it surprising or provocative)
+- headlines: array of 3 short punchy headlines (max 10 words each)
+- subheadlines: array of 3 supporting lines (max 20 words each)
+- ctas: array of 3 call-to-action button texts (max 5 words each)
+- body_copy: one ad body paragraph (40-60 words)
+- hashtags: array of 8 relevant hashtags WITHOUT the # symbol
+- hook: one ultra-short opening line for a video reel (max 10 words, surprising or provocative)
 """
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": "You are an expert ad copywriter. Return valid JSON only."},
                 {"role": "user", "content": user_prompt},
             ],
             response_format={"type": "json_object"},
             temperature=0.85,
             max_tokens=800,
         )
-        content = response.choices[0].message.content or "{}"
-        data = json.loads(content)
-        return JSONResponse(content={"status": "ok", "data": data})
+        data = json.loads(response.choices[0].message.content or "{}")
+        return JSONResponse(content=data)
     except Exception as exc:
         logger.error("generate_copy error: %s", exc)
         return _error(500, f"Copy generation failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
-# AI video generation (fal.ai text-to-video)
+# AI video generation (fal.ai)
 # ---------------------------------------------------------------------------
 
 
 @router.post("/api/generate-video")
 async def generate_video(body: VideoRequest) -> JSONResponse:
-    """Kick off an AI video generation job. Returns a request_id to poll."""
     if not has_fal_key():
-        return JSONResponse(
-            content={
-                "status": "disabled",
-                "message": "No FAL_KEY configured — showing animated preview instead.",
-            }
-        )
+        return JSONResponse(content={"status": "disabled"})
 
     prompt = build_video_prompt(
         product_name=body.product_name,
@@ -150,12 +192,8 @@ async def generate_video(body: VideoRequest) -> JSONResponse:
     )
 
     try:
-        result = await submit_video(
-            prompt,
-            aspect_ratio=body.aspect_ratio,
-            duration=body.duration,
-        )
-        return JSONResponse(content={"status": "ok", "prompt": prompt, **result})
+        result = await submit_video(prompt, aspect_ratio=body.aspect_ratio, duration=body.duration)
+        return JSONResponse(content={"prompt": prompt, **result})
     except Exception as exc:
         logger.error("generate_video error: %s", exc)
         return _error(500, f"Video submission failed: {exc}")
@@ -163,10 +201,53 @@ async def generate_video(body: VideoRequest) -> JSONResponse:
 
 @router.get("/api/video-status")
 async def get_video_status(request_id: str, model: str) -> JSONResponse:
-    """Poll the status of a video generation job."""
     try:
         result = await video_status(request_id, model)
-        return JSONResponse(content={"status": "ok", **result})
+        return JSONResponse(content=result)
     except Exception as exc:
         logger.error("video_status error: %s", exc)
         return _error(500, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Demo screen recording
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/record-demo")
+async def record_demo(body: DemoRequest) -> JSONResponse:
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return _error(503, "OpenAI API key not configured — needed to plan the recording script")
+
+    from backend.demo_service import start_demo_job
+
+    job_id = start_demo_job(
+        url=body.url,
+        description=body.description,
+        voiceover=body.voiceover,
+    )
+    return JSONResponse(content={"job_id": job_id, "status": "queued"})
+
+
+@router.get("/api/demo-status")
+def demo_status(job_id: str) -> JSONResponse:
+    from backend.demo_service import get_job
+
+    job = get_job(job_id)
+    if not job:
+        return _error(404, "Job not found")
+    return JSONResponse(content=job)
+
+
+@router.get("/api/demo-video/{job_id}")
+def demo_video(job_id: str):
+    from backend.demo_service import RECORDINGS_DIR, get_job
+
+    job = get_job(job_id)
+    if not job or job.get("status") != "done":
+        return _error(404, "Video not ready")
+    path = RECORDINGS_DIR / job_id / "final.mp4"
+    if not path.exists():
+        return _error(404, "Video file missing")
+    return FileResponse(str(path), media_type="video/mp4")

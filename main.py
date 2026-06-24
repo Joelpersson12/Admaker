@@ -13,9 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.auth_service import init_db
 from backend.routes import router
 
 app = FastAPI(title="Reelix", version="1.0.0")
+
+init_db()
 
 app.add_middleware(
     CORSMiddleware,

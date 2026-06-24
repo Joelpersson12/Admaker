@@ -5,9 +5,13 @@ import Step1ProductInfo from './steps/Step1ProductInfo'
 import Step2GenerateCopy from './steps/Step2GenerateCopy'
 import Step3ComposeAd from './steps/Step3ComposeAd'
 import Step4VideoGenerate from './steps/Step4VideoGenerate'
+import type { User } from '../hooks/useAuth'
 
 interface AdCreatorProps {
   onBack: () => void
+  user?: User | null
+  onSignIn?: () => void
+  onSignOut?: () => void
 }
 
 const STEPS = [
@@ -25,7 +29,7 @@ const DEFAULT_DESIGN: AdDesign = {
   format: 'story',
 }
 
-export default function AdCreator({ onBack }: AdCreatorProps) {
+export default function AdCreator({ onBack, user, onSignIn, onSignOut }: AdCreatorProps) {
   const [step, setStep] = useState<WizardStep>(1)
   const [productInfo, setProductInfo] = useState<ProductInfo | null>(null)
   const [, setGeneratedCopy] = useState<GeneratedCopy | null>(null)
@@ -40,7 +44,7 @@ export default function AdCreator({ onBack }: AdCreatorProps) {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <Header onStart={onBack} minimal onBack={onBack} />
+      <Header onStart={onBack} minimal onBack={onBack} user={user} onSignIn={onSignIn} onSignOut={onSignOut} />
 
       {/* Step progress bar */}
       <div className="pt-20 pb-4 px-6 border-b border-white/8">

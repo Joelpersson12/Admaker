@@ -27,6 +27,49 @@ const GOALS = [
   { value: 'downloads', label: 'App Downloads' },
 ]
 
+const SUGGESTIONS = [
+  {
+    label: '🔩 CAD tool',
+    name: 'Cadio AI',
+    description: 'AI-powered CAD tool that lets you generate editable 3D models just by describing them in plain text. No CAD experience needed — just type what you want and download the file.',
+    audience: 'Engineers, makers, and product designers aged 20–45',
+    tone: 'professional',
+    goal: 'leads',
+  },
+  {
+    label: '👟 Sneakers',
+    name: 'AirStep Limited',
+    description: 'Limited edition handcrafted sneakers made with premium leather and sustainable materials. Each pair is numbered and ships worldwide.',
+    audience: 'Sneaker collectors and streetwear enthusiasts aged 18–35',
+    tone: 'casual',
+    goal: 'sales',
+  },
+  {
+    label: '📱 Mobile app',
+    name: 'FocusFlow',
+    description: 'Productivity app that uses AI to block distractions and build deep work habits. Tracks your focus sessions and gives you weekly insights.',
+    audience: 'Remote workers and students aged 22–40 who struggle with focus',
+    tone: 'inspirational',
+    goal: 'downloads',
+  },
+  {
+    label: '☕ Coffee brand',
+    name: 'Ritual Roasters',
+    description: 'Specialty single-origin coffee beans sourced directly from farms in Ethiopia and Colombia. Roasted to order and delivered fresh within 48 hours.',
+    audience: 'Coffee enthusiasts and home baristas aged 25–45',
+    tone: 'casual',
+    goal: 'sales',
+  },
+  {
+    label: '🏋️ Fitness course',
+    name: 'StrengthOS',
+    description: '12-week home workout program with progressive overload built in. No gym needed — just dumbbells and a mat. Includes nutrition guide and coach access.',
+    audience: 'Busy adults aged 28–50 who want to get fit without a gym',
+    tone: 'urgent',
+    goal: 'sales',
+  },
+]
+
 export default function Step1ProductInfo({ onNext }: Props) {
   const [form, setForm] = useState<Partial<ProductInfo>>({
     tone: 'professional',
@@ -59,6 +102,19 @@ export default function Step1ProductInfo({ onNext }: Props) {
       <div className="mb-8">
         <h1 className="text-3xl font-black text-white mb-2">Tell us about your product</h1>
         <p className="text-white/45 text-sm">The more detail you give, the better your AI-generated ads will be.</p>
+      </div>
+
+      <div className="mb-5">
+        <p className="text-xs font-bold uppercase tracking-widest text-white/35 mb-2">Start with an example</p>
+        <div className="flex flex-wrap gap-2">
+          {SUGGESTIONS.map((s, i) => (
+            <button key={i}
+              onClick={() => setForm(f => ({ ...f, name: s.name, description: s.description, audience: s.audience, tone: s.tone as ProductInfo['tone'], goal: s.goal as ProductInfo['goal'] }))}
+              className="text-xs px-3 py-1.5 rounded-full border border-white/10 bg-white/3 text-white/55 hover:border-brand-400/50 hover:text-white/90 hover:bg-brand-500/10 transition-all">
+              {s.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="space-y-5">
