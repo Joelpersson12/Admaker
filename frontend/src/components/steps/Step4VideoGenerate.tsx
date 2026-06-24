@@ -79,7 +79,7 @@ export default function Step4VideoGenerate({ productInfo, adSelection, adDesign,
         return
       }
       if (!res.ok || !data.request_id) {
-        throw new Error(data.error || `Error ${res.status}`)
+        throw new Error((data as any).message || data.error || `Error ${res.status}`)
       }
 
       setRequestId(data.request_id)

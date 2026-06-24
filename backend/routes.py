@@ -48,7 +48,7 @@ class VideoRequest(BaseModel):
     hook: str = ""
     headline: str = ""
     aspect_ratio: str = "9:16"
-    duration: str = "5"
+    duration: int = 5
 
 
 class RegisterRequest(BaseModel):

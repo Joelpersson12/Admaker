@@ -53,7 +53,7 @@ async def submit_video(
     payload: dict[str, Any] = {
         "prompt": prompt,
         "aspect_ratio": aspect_ratio,
-        "duration": duration,
+        "duration": int(duration),
     }
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(
@@ -61,7 +61,8 @@ async def submit_video(
             headers=_headers(),
             json=payload,
         )
-        resp.raise_for_status()
+        if not resp.is_success:
+            raise RuntimeError(f"fal.ai {resp.status_code}: {resp.text}")
         data = resp.json()
 
     return {
