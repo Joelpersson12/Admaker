@@ -177,7 +177,7 @@ export default function DemoRecorder({ onBack, user, onSignIn, onSignOut }: Prop
                   value={voiceover}
                   onChange={e => setVoiceover(e.target.value)}
                   rows={4}
-                  placeholder="Did you know you can generate editable CAD models with AI? Just go to Cadio.net, describe what you need, and it creates a 3D model in seconds..."
+                  placeholder="Tired of doing this the hard way? Our tool lets you do it in seconds — just sign up, follow the steps, and you're done. Try it free today."
                   className="input-field resize-none"
                 />
                 <p className="text-white/25 text-xs mt-2">
@@ -215,7 +215,7 @@ export default function DemoRecorder({ onBack, user, onSignIn, onSignOut }: Prop
               <p className="text-white/35 text-sm">
                 {phase === 'recording' && 'Playwright is navigating and capturing frames…'}
                 {phase === 'encoding' && 'ffmpeg is combining video, voice and captions…'}
-                {phase === 'planning' && 'GPT-4o is generating the action script…'}
+                {phase === 'planning' && 'AI is planning the browser actions…'}
               </p>
               <p className="text-white/20 text-xs mt-4">This takes 2–3 minutes. Don't close the tab.</p>
             </div>
@@ -250,7 +250,7 @@ export default function DemoRecorder({ onBack, user, onSignIn, onSignOut }: Prop
                 <span className="text-red-400 text-lg font-bold">!</span>
               </div>
               <p className="text-red-400 font-semibold mb-2">{error}</p>
-              <p className="text-white/35 text-sm mb-6">Check that the URL is public and your OPENAI_API_KEY is set.</p>
+              <p className="text-white/35 text-sm mb-6">Check that the URL is public and reachable, and that GROQ_API_KEY is set in your deployment secrets.</p>
               <button onClick={() => setPhase('form')} className="btn-primary px-6 py-2.5 text-sm">Try Again</button>
             </div>
           )}

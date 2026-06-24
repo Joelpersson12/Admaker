@@ -217,9 +217,9 @@ async def get_video_status(request_id: str, model: str) -> JSONResponse:
 
 @router.post("/api/record-demo")
 async def record_demo(body: DemoRequest) -> JSONResponse:
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
-        return _error(503, "OpenAI API key not configured — needed to plan the recording script")
+        return _error(503, "Groq API key not configured — add GROQ_API_KEY in HF Spaces → Settings → Secrets")
 
     from backend.demo_service import start_demo_job
 
