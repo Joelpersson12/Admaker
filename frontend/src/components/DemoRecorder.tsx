@@ -24,26 +24,20 @@ const EXAMPLES = [
   {
     label: '🔩 Cadio — CAD models',
     url: 'https://cadio.net',
-    description: 'Show the homepage, click to create a new model, type "a simple L-bracket", wait for the 3D model to generate, rotate it to show it off, then click download.',
-    voiceover: "Did you know you can generate editable CAD models using AI? Just go to Cadio.net, describe the part you need, and it builds a real 3D model in seconds. You can edit it, rotate it, and download the file — completely free to try.",
+    description: 'Show the homepage, click the Start Building button, type "headset stand" in the prompt, wait for the 3D model to generate, then scroll to show the result.',
+    voiceover: "Tired of doing this the hard way? Our tool lets you do it in seconds — just sign up, follow the steps, and you're done. Try it free today.",
   },
   {
-    label: '🛍️ E-commerce store',
-    url: 'https://example-shop.com',
-    description: 'Show the homepage hero, scroll down to the product grid, click on a featured product, show the product details and images, then click Add to Cart.',
-    voiceover: "Shopping has never been easier. Browse thousands of products, see detailed photos and reviews, and add to your cart in one click. Fast shipping, easy returns — shop smarter today.",
+    label: '🐙 GitHub — open source',
+    url: 'https://github.com/anthropics/anthropic-sdk-python',
+    description: 'Show the repository homepage, scroll down through the README, click on the Code button to show the clone options.',
+    voiceover: "Everything you need is right here. Browse the code, read the docs, and get started in minutes — completely open source and free to use.",
   },
   {
-    label: '📊 SaaS dashboard',
-    url: 'https://example-saas.com',
-    description: 'Show the landing page, click Get Started, show the dashboard with charts and metrics, navigate to the reports section, then show an export button.',
-    voiceover: "Stop spending hours on manual reports. Our dashboard gives you real-time insights at a glance — track your key metrics, generate reports in one click, and make data-driven decisions faster than ever.",
-  },
-  {
-    label: '📱 Mobile app website',
-    url: 'https://example-app.com',
-    description: 'Show the app landing page, scroll through features section, show testimonials, then scroll to the download buttons.',
-    voiceover: "The app that changes how you work. Thousands of users already use it daily to save time and stay organized. Download it free on App Store or Google Play.",
+    label: '🎨 Tailwind CSS — docs',
+    url: 'https://tailwindcss.com',
+    description: 'Show the homepage, scroll through the features section, click Get Started, show the installation docs.',
+    voiceover: "Stop writing custom CSS. Tailwind gives you utility classes that let you build any design directly in your HTML — faster than ever before.",
   },
 ]
 
@@ -57,6 +51,8 @@ export default function DemoRecorder({ onBack, user, onSignIn, onSignOut }: Prop
   const [error, setError] = useState<string | null>(null)
   const [phaseLabel, setPhaseLabel] = useState('')
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pollStartRef = useRef<number>(0)
+  const errorCountRef = useRef<number>(0)
 
   useEffect(() => () => { if (pollRef.current) clearTimeout(pollRef.current) }, [])
 
@@ -65,15 +61,17 @@ export default function DemoRecorder({ onBack, user, onSignIn, onSignOut }: Prop
     setPhase('planning')
     setError(null)
     setVideoUrl(null)
+    pollStartRef.current = Date.now()
+    errorCountRef.current = 0
 
     try {
       const res = await fetch('/api/record-demo', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, description, voiceover }),
+        body: JSON.stringify({ url: url.trim(), description: description.trim(), voiceover: voiceover.trim() }),
       })
       const data = await res.json()
-      if (!res.ok || data.status === 'error') throw new Error(data.message || `Error ${res.status}`)
+      if (!res.ok || data.status === 'error') throw new Error(data.message || data.error || `Error ${res.status}`)
       setJobId(data.job_id)
       schedulePoll(data.job_id)
     } catch (e: unknown) {
@@ -87,10 +85,19 @@ export default function DemoRecorder({ onBack, user, onSignIn, onSignOut }: Prop
   }
 
   async function poll(id: string) {
+    // Hard 8-minute client-side timeout
+    if (Date.now() - pollStartRef.current > 8 * 60 * 1000) {
+      setError('Timed out waiting for the server. The job may still be running — try refreshing.')
+      setPhase('error')
+      return
+    }
+
     try {
       const res = await fetch(`/api/demo-status?job_id=${id}`)
+      if (!res.ok) throw new Error(`Status ${res.status}`)
       const data = await res.json()
-      const s = data.status as string
+      const s: string = data.status
+      errorCountRef.current = 0
       setPhaseLabel(PHASE_LABELS[s] ?? s)
 
       if (s === 'done') {
@@ -105,7 +112,14 @@ export default function DemoRecorder({ onBack, user, onSignIn, onSignOut }: Prop
         schedulePoll(id, 4000)
       }
     } catch {
-      schedulePoll(id, 6000)
+      errorCountRef.current += 1
+      if (errorCountRef.current > 10) {
+        setError('Lost connection to server after multiple retries.')
+        setPhase('error')
+        return
+      }
+      // Exponential backoff up to 30s
+      schedulePoll(id, Math.min(6000 * errorCountRef.current, 30000))
     }
   }
 
