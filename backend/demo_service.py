@@ -35,10 +35,11 @@ def ms_to_srt(ms: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{r:03d}"
 
 
-async def _tts(text: str, path: str, voice: str = "en-US-AriaNeural") -> bool:
+async def _tts(text: str, path: str, voice: str = "en-US-GuyNeural") -> bool:
     try:
         import edge_tts  # type: ignore
-        await edge_tts.Communicate(text, voice).save(path)
+        communicate = edge_tts.Communicate(text, voice, rate="+12%", pitch="-3Hz")
+        await communicate.save(path)
         return True
     except Exception as e:
         print(f"[demo] TTS error: {e}")
