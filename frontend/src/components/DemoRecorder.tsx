@@ -86,7 +86,7 @@ export default function DemoRecorder({ onBack, user, onSignIn, onSignOut }: Prop
 
   async function poll(id: string) {
     // Hard 8-minute client-side timeout
-    if (Date.now() - pollStartRef.current > 8 * 60 * 1000) {
+    if (Date.now() - pollStartRef.current > 10 * 60 * 1000) {
       setError('Timed out waiting for the server. The job may still be running — try refreshing.')
       setPhase('error')
       return

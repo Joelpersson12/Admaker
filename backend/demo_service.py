@@ -39,6 +39,10 @@ _FADE_DUR  = 0.35  # crossfade duration between scenes
 
 
 def _ffmpeg() -> str:
+    import shutil
+    sys_ffmpeg = shutil.which("ffmpeg")
+    if sys_ffmpeg:
+        return sys_ffmpeg
     import imageio_ffmpeg  # type: ignore
     return imageio_ffmpeg.get_ffmpeg_exe()
 
@@ -106,7 +110,7 @@ Homepage DOM (real data):
 What to show: {description}
 Voiceover script: {voiceover}
 
-Plan 4-6 scenes. Each scene is a page state to screenshot.
+Plan exactly 4 scenes (no more, no less). Each scene is a page state to screenshot.
 For scenes that need a text input filled (like a search or prompt), include fill_selector + fill_value.
 
 Return JSON:
@@ -188,7 +192,7 @@ async def _capture_scenes(scenes: list, out: Path) -> list[Path]:
 
         for i, scene in enumerate(scenes):
             url      = scene.get("url", "")
-            wait_ms  = min(int(scene.get("wait_ms", 2000)), 5000)
+            wait_ms  = min(int(scene.get("wait_ms", 1500)), 3500)
             fill_sel = scene.get("fill_selector")
             fill_val = scene.get("fill_value")
 
@@ -250,7 +254,7 @@ def _build_video(shots: list[Path], audio_path: str | None, srt_path: str, out: 
             "-loop", "1", "-framerate", "24", "-t", str(_SCENE_DUR),
             "-i", str(shot),
             "-vf", vf,
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", str(clip)
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast", str(clip)
         ], capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"Ken Burns clip {i} failed: {r.stderr[-300:]}")
@@ -277,7 +281,7 @@ def _build_video(shots: list[Path], audio_path: str | None, srt_path: str, out: 
         [ffmpeg, "-y"] + inputs + [
             "-filter_complex", filt,
             "-map", "[outv]",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", str(merged)
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast", str(merged)
         ], capture_output=True, text=True
     )
     if r.returncode != 0:
@@ -313,11 +317,11 @@ async def _run_recording(job_id: str, url: str, description: str, voiceover: str
     task = asyncio.create_task(_do_recording(job_id, url, description, voiceover))
 
     async def _watchdog() -> None:
-        await asyncio.sleep(180)  # 3-minute hard cap
+        await asyncio.sleep(300)  # 5-minute hard cap
         if JOBS.get(job_id, {}).get("status") not in ("done", "error"):
             task.cancel()
             JOBS[job_id].update({"status": "error",
-                                  "error": "Timed out — try a shorter description"})
+                                  "error": "Timed out after 5 minutes — the site may be slow or unreachable"})
 
     watchdog = asyncio.create_task(_watchdog())
     try:
