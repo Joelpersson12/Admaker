@@ -223,7 +223,7 @@ async def record_demo(body: DemoRequest) -> JSONResponse:
 
     from backend.demo_service import start_demo_job
 
-    job_id = start_demo_job(
+    job_id = await start_demo_job(
         url=body.url,
         description=body.description,
         voiceover=body.voiceover,

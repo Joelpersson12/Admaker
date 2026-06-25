@@ -95,16 +95,17 @@ Rules:
     return json.loads(resp.choices[0].message.content or "{}")
 
 
-async def _safe_navigate(page, url: str, timeout: int = 30000) -> None:
-    """Navigate with networkidle, fall back to domcontentloaded + extra wait."""
+async def _safe_navigate(page, url: str) -> None:
+    """Load page: domcontentloaded first, then wait briefly for SPA hydration."""
     try:
-        await page.goto(url, wait_until="networkidle", timeout=timeout)
+        await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+    except Exception as e:
+        raise RuntimeError(f"Could not load {url}: {e}") from e
+    # Give SPA frameworks (React/Vue/Next) time to mount without blocking on networkidle
+    try:
+        await page.wait_for_load_state("networkidle", timeout=6000)
     except Exception:
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-            await asyncio.sleep(2.5)
-        except Exception as e:
-            raise RuntimeError(f"Could not load {url}: {e}") from e
+        await asyncio.sleep(2.5)
 
 
 async def _safe_click(page, action: dict) -> None:
@@ -203,6 +204,16 @@ async def _record(page, frames_dir: Path, duration_ms: int, frame_state: list) -
 
 
 async def _run_recording(job_id: str, url: str, description: str, voiceover: str) -> None:
+    try:
+        await asyncio.wait_for(
+            _do_recording(job_id, url, description, voiceover),
+            timeout=360,  # 6-minute hard cap
+        )
+    except asyncio.TimeoutError:
+        JOBS[job_id].update({"status": "error", "error": "Recording timed out after 6 minutes"})
+
+
+async def _do_recording(job_id: str, url: str, description: str, voiceover: str) -> None:
     JOBS[job_id]["status"] = "planning"
     out = RECORDINGS_DIR / job_id
     out.mkdir(exist_ok=True)
@@ -321,7 +332,7 @@ async def _run_recording(job_id: str, url: str, description: str, voiceover: str
         JOBS[job_id].update({"status": "error", "error": str(e)})
 
 
-def start_demo_job(url: str, description: str, voiceover: str) -> str:
+async def start_demo_job(url: str, description: str, voiceover: str) -> str:
     job_id = str(uuid.uuid4())
     JOBS[job_id] = {"status": "queued"}
     asyncio.create_task(_run_recording(job_id, url, description, voiceover))
