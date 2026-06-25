@@ -205,13 +205,23 @@ async def _record(page, frames_dir: Path, duration_ms: int, frame_state: list) -
 
 
 async def _run_recording(job_id: str, url: str, description: str, voiceover: str) -> None:
+    task = asyncio.create_task(_do_recording(job_id, url, description, voiceover))
+
+    async def _watchdog() -> None:
+        await asyncio.sleep(300)  # 5-minute hard cap
+        if JOBS.get(job_id, {}).get("status") not in ("done", "error"):
+            task.cancel()
+            JOBS[job_id].update({"status": "error", "error": "Timed out after 5 minutes — the site may be too complex or unreachable"})
+
+    watchdog = asyncio.create_task(_watchdog())
     try:
-        await asyncio.wait_for(
-            _do_recording(job_id, url, description, voiceover),
-            timeout=360,  # 6-minute hard cap
-        )
-    except asyncio.TimeoutError:
-        JOBS[job_id].update({"status": "error", "error": "Recording timed out after 6 minutes"})
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        JOBS[job_id].update({"status": "error", "error": str(e)})
+    finally:
+        watchdog.cancel()
 
 
 async def _do_recording(job_id: str, url: str, description: str, voiceover: str) -> None:
@@ -254,9 +264,13 @@ async def _do_recording(job_id: str, url: str, description: str, voiceover: str)
             # Hide webdriver fingerprint on every new page
             await ctx.add_init_script(_STEALTH_JS)
             page = await ctx.new_page()
+            # Global cap: every Playwright op times out at 8s unless overridden
+            page.set_default_timeout(8000)
+            page.set_default_navigation_timeout(25000)
 
             for action in actions:
-                wait_ms = action.get("wait_ms", 1000)
+                # Cap wait_ms so no single action can record for more than 12s
+                wait_ms = min(action.get("wait_ms", 1000), 12000)
                 try:
                     t = action["type"]
                     if t == "navigate":
@@ -266,7 +280,7 @@ async def _do_recording(job_id: str, url: str, description: str, voiceover: str)
                     elif t == "wait_for":
                         sel = action.get("selector", "body")
                         try:
-                            await page.wait_for_selector(sel, timeout=wait_ms)
+                            await page.wait_for_selector(sel, timeout=6000)
                         except Exception:
                             pass
                     elif t == "scroll":
