@@ -6,3 +6,4 @@ groq
 playwright
 edge-tts
 python-jose[cryptography]
+imageio-ffmpeg

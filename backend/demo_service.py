@@ -1,3 +1,12 @@
+"""
+Reelix demo_service — screenshot-based ad reel generator.
+
+Flow:
+  1. Groq plans 4-6 "scenes" given homepage DOM (each scene = a URL/state to show)
+  2. Playwright navigates to each scene, takes ONE high-quality screenshot
+  3. ffmpeg: Ken Burns zoom per scene, xfade transitions, voiceover, bottom captions
+  4. Output: 1080x1920 vertical MP4, ready for Reels/TikTok/Shorts
+"""
 from __future__ import annotations
 
 import asyncio
@@ -14,17 +23,24 @@ RECORDINGS_DIR.mkdir(exist_ok=True)
 JOBS: dict[str, dict] = {}
 
 _STEALTH_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 )
 
 _STEALTH_JS = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3]});
 window.chrome = {runtime: {}};
 """
+
+# Scene duration and transition settings
+_SCENE_DUR = 2.8   # seconds each scene is shown
+_FADE_DUR  = 0.35  # crossfade duration between scenes
+
+
+def _ffmpeg() -> str:
+    import imageio_ffmpeg  # type: ignore
+    return imageio_ffmpeg.get_ffmpeg_exe()
 
 
 def ms_to_srt(ms: int) -> str:
@@ -35,275 +51,273 @@ def ms_to_srt(ms: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{r:03d}"
 
 
+# ── TTS ────────────────────────────────────────────────────────────────────────
+
 async def _tts(text: str, path: str, voice: str = "en-US-GuyNeural") -> bool:
     try:
         import edge_tts  # type: ignore
-        communicate = edge_tts.Communicate(text, voice, rate="+12%", pitch="-3Hz")
-        await communicate.save(path)
+        await edge_tts.Communicate(text, voice, rate="+12%", pitch="-3Hz").save(path)
         return Path(path).exists() and Path(path).stat().st_size > 0
     except Exception as e:
         print(f"[demo] TTS error: {e}")
         return False
 
 
-async def _extract_page_info(page) -> dict:
-    """Read the live DOM so Groq gets real element data."""
+# ── DOM extraction ─────────────────────────────────────────────────────────────
+
+async def _extract_dom(page) -> dict:
     try:
         return await page.evaluate("""() => {
-            const text = t => (t || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
-            const buttons = Array.from(document.querySelectorAll(
-                'button, [role="button"], input[type="button"], input[type="submit"]'
-            )).slice(0, 25).map(el => ({
-                text: text(el.innerText || el.value),
-                id: el.id || null,
-                cls: el.className ? el.className.toString().slice(0, 80) : null,
-                tag: el.tagName.toLowerCase(),
-            })).filter(b => b.text);
-            const links = Array.from(document.querySelectorAll('a[href]'))
-                .slice(0, 25)
-                .map(el => ({ text: text(el.innerText), href: el.href }))
-                .filter(l => l.text);
-            const inputs = Array.from(document.querySelectorAll(
-                'input[placeholder], textarea[placeholder], input[type="text"], input[type="search"], textarea'
-            )).slice(0, 10).map(el => ({
-                placeholder: el.placeholder || '',
-                id: el.id || null,
-                name: el.name || null,
-                tag: el.tagName.toLowerCase(),
-            }));
-            const headings = Array.from(document.querySelectorAll('h1, h2, h3'))
-                .slice(0, 6).map(el => text(el.innerText));
+            const txt = t => (t||'').trim().replace(/\\s+/g,' ').slice(0,80);
             return {
-                url: window.location.href,
+                url: location.href,
                 title: document.title,
-                headings, buttons, links, inputs,
+                headings: [...document.querySelectorAll('h1,h2,h3')].slice(0,5).map(e=>txt(e.innerText)),
+                buttons: [...document.querySelectorAll('button,[role=button]')].slice(0,20)
+                    .map(e=>({text:txt(e.innerText),id:e.id||null})).filter(b=>b.text),
+                links: [...document.querySelectorAll('a[href]')].slice(0,20)
+                    .map(e=>({text:txt(e.innerText),href:e.href})).filter(l=>l.text),
+                inputs: [...document.querySelectorAll('input[placeholder],textarea')].slice(0,8)
+                    .map(e=>({placeholder:e.placeholder||'',id:e.id||null})),
             };
         }""")
-    except Exception as e:
-        print(f"[demo] DOM extract failed: {e}")
+    except Exception:
         return {}
 
 
-async def _groq_plan(page_info: dict, description: str, voiceover: str) -> dict:
+# ── Groq scene planning ────────────────────────────────────────────────────────
+
+async def _plan_scenes(dom: dict, description: str, voiceover: str) -> dict:
     from groq import Groq
 
     api_key = os.getenv("GROQ_API_KEY", "")
     if not api_key:
-        raise RuntimeError("GROQ_API_KEY not set")
+        raise RuntimeError("GROQ_API_KEY not set in deployment secrets")
 
     client = Groq(api_key=api_key)
-    page_summary = json.dumps(page_info, indent=2)
 
-    prompt = f"""You are generating a Playwright browser automation script for a screen recording demo video.
+    prompt = f"""You are planning a short social-media ad video (Reels style) for a website.
+The video is made by taking SCREENSHOTS of key moments and assembling them with voiceover.
 Return ONLY valid JSON.
 
-The browser is a MOBILE viewport (390x844, iPhone-sized) and has already loaded the starting page. Here is the REAL DOM data right now:
-{page_summary}
+Homepage DOM (real data):
+{json.dumps(dom, indent=2)}
 
-Goal: {description}
-Voiceover: {voiceover}
+What to show: {description}
+Voiceover script: {voiceover}
 
-Return a JSON object with:
-- "actions": array of action objects
-- "caption_segments": array of {{text, start_ms, duration_ms}}
+Plan 4-6 scenes. Each scene is a page state to screenshot.
+For scenes that need a text input filled (like a search or prompt), include fill_selector + fill_value.
 
-Action types:
-  {{"type":"wait","wait_ms":1500}}
-  {{"type":"navigate","url":"full URL including hash e.g. https://cadio.net/#builder","wait_ms":2500}}
-  {{"type":"wait_for","selector":"CSS selector","wait_ms":2000}}
-  {{"type":"scroll","y":300,"wait_ms":1000}}
-  {{"type":"scroll_to_bottom","wait_ms":1000}}
-  {{"type":"click_text","text":"EXACT text from buttons/links in DOM above","wait_ms":2000}}
-  {{"type":"click_selector","selector":"#id or .class","wait_ms":2000}}
-  {{"type":"fill_placeholder","placeholder":"exact placeholder","value":"text","wait_ms":1500}}
-  {{"type":"fill_selector","selector":"CSS selector","value":"text","wait_ms":1500}}
-  {{"type":"press","key":"Enter","wait_ms":2000}}
+Return JSON:
+{{
+  "scenes": [
+    {{
+      "url": "full URL to navigate to (use hash routes like https://cadio.net/#builder if needed)",
+      "wait_ms": 2500,
+      "caption": "Short punchy caption for this scene (max 8 words)",
+      "fill_selector": "CSS selector or null",
+      "fill_value": "text to type or null"
+    }}
+  ],
+  "caption_segments": [
+    {{"text": "caption text", "start_ms": 0, "duration_ms": 2500}}
+  ]
+}}
 
 Rules:
-- Use EXACT button/link text from DOM data above
-- Prefer click_selector with #id when element has an id
-- For hash routes use navigate with full URL (e.g. https://example.com/#builder)
-- After navigation or clicks that change page, use wait_ms 2500
-- Total sum of all wait_ms: max 18000ms (18 seconds) — hard limit
-- Maximum 8 actions total
-- caption_segments start at 0ms"""
+- First scene should always be the homepage
+- Use the EXACT button texts and link hrefs from DOM above
+- For hash-routes: use navigate with full URL (e.g. https://cadio.net/#builder)
+- wait_ms: how long to wait after navigating BEFORE taking the screenshot (let the page render)
+  - Simple pages: 1500ms. SPAs/dynamic content: 3000ms. AI generation: 5000ms.
+- keep captions SHORT and punchy — max 8 words per scene, hooks like "Did you know?"
+- caption_segments should cover the full voiceover timing"""
 
-    # 30-second hard timeout on the Groq API call
     resp = await asyncio.wait_for(
         asyncio.to_thread(
             client.chat.completions.create,
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            max_tokens=2000,
+            max_tokens=1500,
         ),
         timeout=30,
     )
     return json.loads(resp.choices[0].message.content or "{}")
 
 
-async def _safe_navigate(page, url: str) -> None:
+# ── Playwright screenshot capture ──────────────────────────────────────────────
+
+async def _navigate(page, url: str, wait_ms: int) -> None:
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
     except Exception as e:
-        raise RuntimeError(f"Could not load {url}: {e}") from e
-    try:
-        await page.wait_for_load_state("networkidle", timeout=5000)
-    except Exception:
-        await asyncio.sleep(2.0)
-
-
-async def _safe_click(page, action: dict) -> None:
-    text = action.get("text", "")
-    selector = action.get("selector", "")
-    role = action.get("role", "button")
-    name = action.get("name", "")
-    t = action["type"]
-    TO = 6000
-
-    if t == "click_text":
-        strategies = [
-            lambda: page.get_by_text(text, exact=True).first.click(timeout=TO),
-            lambda: page.get_by_text(text, exact=False).first.click(timeout=TO),
-            lambda: page.locator(f"text={text}").first.click(timeout=TO),
-        ]
-    elif t == "click_role":
-        strategies = [
-            lambda: page.get_by_role(role, name=name).first.click(timeout=TO),
-            lambda: page.get_by_role(role).filter(has_text=name).first.click(timeout=TO),
-        ]
-    elif t == "click_selector":
-        strategies = [
-            lambda: page.locator(selector).first.click(timeout=TO),
-            lambda: page.locator(selector).nth(0).click(timeout=TO, force=True),
-        ]
-    else:
+        print(f"[demo] navigate failed: {e}")
         return
-
-    errors = []
-    for strategy in strategies:
-        try:
-            await strategy()
-            return
-        except Exception as e:
-            errors.append(str(e))
-
-    # JS click fallback
     try:
-        if t == "click_text" and text:
-            escaped = json.dumps(text)
-            await page.evaluate(
-                f"""() => {{
-                    const el = Array.from(document.querySelectorAll('button,a,[role=button]'))
-                        .find(e => e.textContent.trim().includes({escaped}));
-                    if (el) el.click();
-                }}"""
-            )
-            return
-        if t == "click_selector" and selector:
-            escaped_sel = json.dumps(selector)
-            await page.evaluate(
-                f"""() => {{ const el = document.querySelector({escaped_sel}); if (el) el.click(); }}"""
-            )
-            return
-    except Exception as e:
-        errors.append(f"js: {e}")
-
-    print(f"[demo] click failed: {errors[-1] if errors else 'unknown'}")
+        await page.wait_for_load_state("networkidle", timeout=4000)
+    except Exception:
+        pass
+    await asyncio.sleep(wait_ms / 1000)
 
 
-async def _safe_fill(page, action: dict) -> None:
-    placeholder = action.get("placeholder", "")
-    selector = action.get("selector", "")
-    value = action.get("value", "")
-    t = action["type"]
-    TO = 6000
+async def _capture_scenes(scenes: list, out: Path) -> list[Path]:
+    """Navigate to each scene, optionally fill an input, take one screenshot."""
+    from playwright.async_api import async_playwright  # type: ignore
 
-    try:
-        if t == "fill_placeholder":
-            try:
-                await page.get_by_placeholder(placeholder).fill(value, timeout=TO)
-            except Exception:
-                # Escape special chars for CSS attribute selector
-                safe_ph = placeholder[:20].replace("'", "\\'").replace('"', '\\"')
-                await page.locator(f"[placeholder*='{safe_ph}']").first.fill(value, timeout=TO)
-        elif t == "fill_label":
-            label = action.get("label", "")
-            try:
-                await page.get_by_label(label).fill(value, timeout=TO)
-            except Exception:
-                safe_label = json.dumps(label)
-                await page.locator(
-                    f"label:has-text({safe_label}) + input, label:has-text({safe_label}) ~ input"
-                ).first.fill(value, timeout=TO)
-        elif t == "fill_selector":
-            await page.locator(selector).first.fill(value, timeout=TO)
-    except Exception as e:
-        print(f"[demo] fill failed: {e}")
+    shots: list[Path] = []
 
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(args=[
+            "--no-sandbox", "--disable-dev-shm-usage",
+            "--disable-setuid-sandbox",
+            "--disable-blink-features=AutomationControlled",
+        ])
+        ctx = await browser.new_context(
+            viewport={"width": 390, "height": 844},
+            is_mobile=True,
+            has_touch=True,
+            user_agent=_STEALTH_UA,
+            locale="en-US",
+        )
+        await ctx.add_init_script(_STEALTH_JS)
+        page = await ctx.new_page()
+        page.set_default_timeout(8000)
+        page.set_default_navigation_timeout(20000)
 
-_FPS = 12
+        for i, scene in enumerate(scenes):
+            url      = scene.get("url", "")
+            wait_ms  = min(int(scene.get("wait_ms", 2000)), 5000)
+            fill_sel = scene.get("fill_selector")
+            fill_val = scene.get("fill_value")
 
-async def _record(page, frames_dir: Path, duration_ms: int, frame_state: list) -> None:
-    interval = 1 / _FPS
-    count = max(1, int(duration_ms / 1000 * _FPS))
-    for _ in range(count):
-        idx = frame_state[0]
-        try:
-            data = await page.screenshot(full_page=False)
-            (frames_dir / f"frame_{idx:06d}.png").write_bytes(data)
-        except Exception:
-            pass
-        frame_state[0] += 1
-        await asyncio.sleep(interval)
+            if not url:
+                continue
 
+            await _navigate(page, url, wait_ms)
 
-async def _execute_actions(page, actions: list, frames_dir: Path, frame_state: list) -> None:
-    for action in actions:
-        wait_ms = min(action.get("wait_ms", 1000), 3000)
-        try:
-            t = action["type"]
-            if t == "navigate":
-                await _safe_navigate(page, action["url"])
-            elif t == "wait":
-                pass
-            elif t == "wait_for":
+            # Optional: fill a text input (e.g. "headset stand" into the builder prompt)
+            if fill_sel and fill_val:
                 try:
-                    await page.wait_for_selector(action.get("selector", "body"), timeout=6000)
-                except Exception:
-                    pass
-            elif t == "scroll":
-                await page.evaluate(f"window.scrollBy(0,{int(action.get('y', 300))})")
-            elif t == "scroll_to_bottom":
-                await page.evaluate("window.scrollTo(0,document.body.scrollHeight)")
-            elif t in ("click_text", "click_role", "click_selector"):
-                await _safe_click(page, action)
-            elif t in ("fill_placeholder", "fill_label", "fill_selector"):
-                await _safe_fill(page, action)
-            elif t == "press":
-                await page.keyboard.press(action.get("key", "Enter"))
-            elif t == "hover":
-                try:
-                    await page.locator(action.get("selector", "body")).first.hover(timeout=4000)
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"[demo] action '{action.get('type')}' failed: {e}")
+                    el = page.locator(fill_sel).first
+                    await el.fill(fill_val, timeout=5000)
+                    await asyncio.sleep(0.5)
+                    # Press Enter to submit if it looks like a search/prompt
+                    await page.keyboard.press("Enter")
+                    # Wait for result to appear
+                    await asyncio.sleep(min(wait_ms / 1000, 4))
+                except Exception as e:
+                    print(f"[demo] fill scene {i} failed: {e}")
 
-        await _record(page, frames_dir, wait_ms, frame_state)
+            # Take the screenshot
+            shot = out / f"scene_{i:02d}.png"
+            try:
+                await page.screenshot(path=str(shot), full_page=False)
+                shots.append(shot)
+                print(f"[demo] scene {i} captured: {shot.name}")
+            except Exception as e:
+                print(f"[demo] screenshot scene {i} failed: {e}")
 
+        await browser.close()
+
+    return shots
+
+
+# ── ffmpeg video assembly ──────────────────────────────────────────────────────
+
+def _build_video(shots: list[Path], audio_path: str | None, srt_path: str, out: Path) -> Path:
+    ffmpeg = _ffmpeg()
+    n = len(shots)
+    clips: list[Path] = []
+
+    # Step 1: Ken Burns clip per screenshot (zoom-in / zoom-out alternating)
+    for i, shot in enumerate(shots):
+        clip = out / f"clip_{i:02d}.mp4"
+        frames = int(_SCENE_DUR * 24)
+        if i % 2 == 0:
+            zoom_expr = "z='min(zoom+0.0012,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+        else:
+            zoom_expr = "z='if(eq(on,1),1.12,max(zoom-0.0012,1.0))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+
+        vf = (
+            "scale=1080:1920:force_original_aspect_ratio=increase,"
+            "crop=1080:1920,"
+            f"zoompan={zoom_expr}:d={frames}:s=1080x1920:fps=24"
+        )
+        r = subprocess.run([
+            ffmpeg, "-y",
+            "-loop", "1", "-framerate", "24", "-t", str(_SCENE_DUR),
+            "-i", str(shot),
+            "-vf", vf,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", str(clip)
+        ], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"Ken Burns clip {i} failed: {r.stderr[-300:]}")
+        clips.append(clip)
+
+    # Step 2: xfade chain to join all clips
+    inputs: list[str] = []
+    for c in clips:
+        inputs += ["-i", str(c)]
+
+    filt_parts: list[str] = []
+    last = "[0:v]"
+    for i in range(1, n):
+        offset = _SCENE_DUR * i - _FADE_DUR * i
+        label = f"[v{i}]" if i < n - 1 else "[outv]"
+        filt_parts.append(
+            f"{last}[{i}:v]xfade=transition=fade:duration={_FADE_DUR}:offset={offset:.3f}{label}"
+        )
+        last = label
+    filt = ";".join(filt_parts)
+
+    merged = out / "merged.mp4"
+    r = subprocess.run(
+        [ffmpeg, "-y"] + inputs + [
+            "-filter_complex", filt,
+            "-map", "[outv]",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", str(merged)
+        ], capture_output=True, text=True
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"xfade merge failed: {r.stderr[-400:]}")
+
+    # Step 3: add captions + audio
+    final = out / "final.mp4"
+    srt_escaped = str(srt_path).replace("\\", "\\\\").replace(":", "\\:")
+    caption_style = (
+        "Fontsize=44,Bold=1,"
+        "PrimaryColour=&H00FFFFFF,"
+        "OutlineColour=&H00000000,"
+        "BorderStyle=1,Outline=3,Shadow=1,"
+        "Alignment=2,MarginV=100"
+    )
+    vf = f"subtitles={srt_escaped}:force_style='{caption_style}'"
+
+    cmd = [ffmpeg, "-y", "-i", str(merged)]
+    if audio_path and Path(audio_path).exists():
+        cmd += ["-i", audio_path, "-c:a", "aac", "-b:a", "192k", "-shortest"]
+    cmd += ["-vf", vf, "-c:v", "libx264", "-crf", "20", "-preset", "fast", str(final)]
+
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"Final encode failed: {r.stderr[-400:]}")
+
+    return final
+
+
+# ── Job management ─────────────────────────────────────────────────────────────
 
 async def _run_recording(job_id: str, url: str, description: str, voiceover: str) -> None:
     task = asyncio.create_task(_do_recording(job_id, url, description, voiceover))
 
     async def _watchdog() -> None:
-        await asyncio.sleep(150)
+        await asyncio.sleep(180)  # 3-minute hard cap
         if JOBS.get(job_id, {}).get("status") not in ("done", "error"):
             task.cancel()
-            JOBS[job_id].update({
-                "status": "error",
-                "error": "Timed out after 2.5 minutes — try a simpler description or fewer steps",
-            })
+            JOBS[job_id].update({"status": "error",
+                                  "error": "Timed out — try a shorter description"})
 
     watchdog = asyncio.create_task(_watchdog())
     try:
@@ -311,7 +325,7 @@ async def _run_recording(job_id: str, url: str, description: str, voiceover: str
     except asyncio.CancelledError:
         pass
     except Exception as e:
-        JOBS[job_id].update({"status": "error", "error": traceback.format_exc()})
+        JOBS[job_id].update({"status": "error", "error": str(e)})
     finally:
         watchdog.cancel()
 
@@ -320,110 +334,84 @@ async def _do_recording(job_id: str, url: str, description: str, voiceover: str)
     JOBS[job_id]["status"] = "planning"
     out = RECORDINGS_DIR / job_id
     out.mkdir(exist_ok=True)
-    frames_dir = out / "frames"
-    frames_dir.mkdir(exist_ok=True)
-
-    from playwright.async_api import async_playwright  # type: ignore
 
     try:
+        from playwright.async_api import async_playwright  # type: ignore
+
+        # ── 1. Load homepage, extract DOM ──────────────────────────────────
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-setuid-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-infobars",
-                    "--window-size=390,844",
-                ]
-            )
+            browser = await p.chromium.launch(args=[
+                "--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox"
+            ])
             ctx = await browser.new_context(
                 viewport={"width": 390, "height": 844},
-                is_mobile=True,
-                has_touch=True,
-                user_agent=_STEALTH_UA,
-                locale="en-US",
-                timezone_id="America/New_York",
-                extra_http_headers={
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                },
+                is_mobile=True, user_agent=_STEALTH_UA
             )
             await ctx.add_init_script(_STEALTH_JS)
             page = await ctx.new_page()
-            page.set_default_timeout(8000)
-            page.set_default_navigation_timeout(25000)
+            page.set_default_timeout(10000)
 
-            frame_state = [0]
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                await asyncio.sleep(2)
+            except Exception as e:
+                raise RuntimeError(f"Cannot reach {url}: {e}")
 
-            # Load page, extract real DOM, ask Groq once with full context
-            await _safe_navigate(page, url)
-            page_info = await _extract_page_info(page)
-            print(f"[demo] DOM: {len(page_info.get('buttons',[]))} buttons, "
-                  f"{len(page_info.get('links',[]))} links, url={page.url}")
-
-            # Record homepage briefly while planning
-            await _record(page, frames_dir, 800, frame_state)
-
-            plan = await _groq_plan(page_info, description, voiceover)
-            actions = plan.get("actions", [])
-            captions = plan.get("caption_segments", [])
-            print(f"[demo] plan ({len(actions)} actions): {json.dumps(actions)}")
-
-            JOBS[job_id]["status"] = "recording"
-            await _execute_actions(page, actions, frames_dir, frame_state)
-
+            dom = await _extract_dom(page)
             await browser.close()
 
-        if frame_state[0] == 0:
-            raise RuntimeError("No frames captured — the URL may not be publicly reachable")
+        print(f"[demo] DOM extracted: {len(dom.get('buttons',[]))} buttons")
 
-        # ── Encoding ───────────────────────────────────────────────────────
+        # ── 2. Plan scenes with Groq ───────────────────────────────────────
+        plan = await _plan_scenes(dom, description, voiceover)
+        scenes = plan.get("scenes", [])
+        captions = plan.get("caption_segments", [])
+        print(f"[demo] {len(scenes)} scenes planned: {json.dumps(scenes)}")
+
+        if not scenes:
+            raise RuntimeError("Groq returned no scenes — try a different description")
+
+        # ── 3. Capture screenshots ─────────────────────────────────────────
+        JOBS[job_id]["status"] = "recording"
+        shots = await _capture_scenes(scenes, out)
+
+        if not shots:
+            raise RuntimeError("No screenshots captured — check that the URL is reachable")
+
+        # ── 4. TTS ────────────────────────────────────────────────────────
         JOBS[job_id]["status"] = "encoding"
+        audio_path = str(out / "voice.mp3")
+        has_audio = await _tts(voiceover, audio_path)
 
-        audio_path = out / "voice.mp3"
-        has_audio = await _tts(voiceover, str(audio_path))
+        # ── 5. SRT captions ───────────────────────────────────────────────
+        srt_path = str(out / "captions.srt")
+        # Auto-generate per-scene captions if Groq didn't supply them
+        if not captions:
+            t = 0
+            per = int(_SCENE_DUR * 1000)
+            for i, sc in enumerate(scenes):
+                cap = sc.get("caption", "")
+                if cap:
+                    captions.append({"text": cap, "start_ms": t, "duration_ms": per - 200})
+                t += per
 
-        srt_path = out / "captions.srt"
         with open(srt_path, "w") as f:
             for i, seg in enumerate(captions, 1):
                 s = seg.get("start_ms", 0)
-                e = s + seg.get("duration_ms", 3000)
+                e = s + seg.get("duration_ms", 2500)
                 f.write(f"{i}\n{ms_to_srt(s)} --> {ms_to_srt(e)}\n{seg['text']}\n\n")
 
-        raw = out / "raw.mp4"
-        subprocess.run(
-            ["ffmpeg", "-y", "-framerate", str(_FPS),
-             "-i", str(frames_dir / "frame_%06d.png"),
-             # Scale 390x1688 (retina 2x) → 1080x1920, pad if needed
-             "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,"
-                    "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
-             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", str(raw)],
-            check=True, capture_output=True
+        # ── 6. Build video ────────────────────────────────────────────────
+        final = await asyncio.to_thread(
+            _build_video, shots, audio_path if has_audio else None, srt_path, out
         )
-
-        final = out / "final.mp4"
-        srt_escaped = str(srt_path).replace("\\", "\\\\").replace(":", "\\:")
-        # Large bold yellow captions — classic Reels style
-        caption_style = (
-            "Fontsize=52,Bold=1,"
-            "PrimaryColour=&H00FFFF00,"   # yellow
-            "OutlineColour=&H00000000,"   # black outline
-            "BorderStyle=1,Outline=3,Shadow=1,"
-            "Alignment=2,MarginV=120"     # centered-bottom with breathing room
-        )
-        vf = f"subtitles={srt_escaped}:force_style='{caption_style}'"
-        cmd = ["ffmpeg", "-y", "-i", str(raw)]
-        if has_audio:
-            cmd += ["-i", str(audio_path), "-c:a", "aac", "-b:a", "192k", "-shortest"]
-        cmd += ["-vf", vf, "-c:v", "libx264", "-crf", "18", "-preset", "fast", str(final)]
-        subprocess.run(cmd, check=True, capture_output=True)
 
         JOBS[job_id].update({"status": "done", "video_path": str(final)})
+        print(f"[demo] done: {final} ({final.stat().st_size//1024}KB)")
 
     except Exception as e:
         JOBS[job_id].update({"status": "error", "error": str(e)})
-        print(f"[demo] recording failed: {traceback.format_exc()}")
+        print(f"[demo] FAILED: {traceback.format_exc()}")
 
 
 async def start_demo_job(url: str, description: str, voiceover: str) -> str:
