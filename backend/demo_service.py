@@ -84,9 +84,7 @@ async def _extract_page_info(page) -> dict:
         return {}
 
 
-async def _groq_plan(page_info: dict, description: str, voiceover: str, phase: str = "full") -> dict:
-    """Ask Groq for a plan given real DOM context. phase='nav' = just get to goal page,
-    phase='interact' = perform actions on current page, phase='full' = everything."""
+async def _groq_plan(page_info: dict, description: str, voiceover: str) -> dict:
     from groq import Groq
 
     api_key = os.getenv("GROQ_API_KEY", "")
@@ -96,66 +94,50 @@ async def _groq_plan(page_info: dict, description: str, voiceover: str, phase: s
     client = Groq(api_key=api_key)
     page_summary = json.dumps(page_info, indent=2)
 
-    if phase == "nav":
-        instruction = (
-            "Return only 1-3 actions that navigate FROM the current page TO the page "
-            "where the demonstration should happen (follow CTAs, links, hash routes). "
-            "Do NOT include any interactions on the target page yet."
-        )
-        max_actions = "3"
-        max_total_ms = "10000"
-    elif phase == "interact":
-        instruction = (
-            "The browser is now on the correct page. Return 4-10 actions that perform "
-            "the actual demonstration described. Include scrolls, fills, clicks, waits."
-        )
-        max_actions = "10"
-        max_total_ms = "40000"
-    else:
-        instruction = "Return all actions from start to finish to demonstrate the goal."
-        max_actions = "14"
-        max_total_ms = "45000"
-
     prompt = f"""You are generating a Playwright browser automation script for a screen recording demo video.
 Return ONLY valid JSON.
 
-The browser currently shows this page (REAL DOM data):
+The browser has already loaded the starting page. Here is the REAL DOM data right now:
 {page_summary}
 
 Goal: {description}
 Voiceover: {voiceover}
-Task: {instruction}
 
 Return a JSON object with:
 - "actions": array of action objects
-- "caption_segments": array of {{text, start_ms, duration_ms}} (only on phase=full or interact)
+- "caption_segments": array of {{text, start_ms, duration_ms}}
 
-Action types available:
+Action types:
   {{"type":"wait","wait_ms":1500}}
-  {{"type":"navigate","url":"full URL including hash if needed","wait_ms":2500}}
+  {{"type":"navigate","url":"full URL including hash e.g. https://cadio.net/#builder","wait_ms":2500}}
   {{"type":"wait_for","selector":"CSS selector","wait_ms":2000}}
   {{"type":"scroll","y":300,"wait_ms":1000}}
   {{"type":"scroll_to_bottom","wait_ms":1000}}
-  {{"type":"click_text","text":"EXACT text from buttons/links listed above","wait_ms":2000}}
-  {{"type":"click_selector","selector":"#id or .class or CSS","wait_ms":2000}}
-  {{"type":"fill_placeholder","placeholder":"exact placeholder","value":"text to type","wait_ms":1000}}
-  {{"type":"fill_selector","selector":"CSS selector","value":"text to type","wait_ms":1000}}
+  {{"type":"click_text","text":"EXACT text from buttons/links in DOM above","wait_ms":2000}}
+  {{"type":"click_selector","selector":"#id or .class","wait_ms":2000}}
+  {{"type":"fill_placeholder","placeholder":"exact placeholder","value":"text","wait_ms":1500}}
+  {{"type":"fill_selector","selector":"CSS selector","value":"text","wait_ms":1500}}
   {{"type":"press","key":"Enter","wait_ms":2000}}
 
 Rules:
-- ONLY use button/link texts that are ACTUALLY in the page data above
-- Prefer click_selector with #id when the element has an id
-- For hash routes (/#builder, /app, etc.) use navigate with the full URL
-- wait_ms is how long to record after this action (shows the result)
-- Total sum of wait_ms across all actions: max {max_total_ms}ms
-- Maximum {max_actions} actions"""
+- Use EXACT button/link text from DOM data above
+- Prefer click_selector with #id when element has an id
+- For hash routes use navigate with full URL (e.g. https://example.com/#builder)
+- After navigation or clicks that change page, use wait_ms 2500
+- Total sum of all wait_ms: max 40000ms (40 seconds)
+- Maximum 10 actions total
+- caption_segments start at 0ms"""
 
-    resp = await asyncio.to_thread(
-        client.chat.completions.create,
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-        max_tokens=2000,
+    # 30-second hard timeout on the Groq API call
+    resp = await asyncio.wait_for(
+        asyncio.to_thread(
+            client.chat.completions.create,
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            max_tokens=2000,
+        ),
+        timeout=30,
     )
     return json.loads(resp.choices[0].message.content or "{}")
 
@@ -369,40 +351,22 @@ async def _do_recording(job_id: str, url: str, description: str, voiceover: str)
 
             frame_state = [0]
 
-            # ── Phase 1: load homepage, read real DOM ──────────────────────
+            # Load page, extract real DOM, ask Groq once with full context
             await _safe_navigate(page, url)
-            start_url = page.url
             page_info = await _extract_page_info(page)
-            print(f"[demo] homepage DOM: {len(page_info.get('buttons',[]))} buttons, "
-                  f"{len(page_info.get('links',[]))} links")
+            print(f"[demo] DOM: {len(page_info.get('buttons',[]))} buttons, "
+                  f"{len(page_info.get('links',[]))} links, url={page.url}")
 
-            # Record homepage for 2 s
-            await _record(page, frames_dir, 2000, frame_state)
+            # Record homepage briefly while planning
+            await _record(page, frames_dir, 1500, frame_state)
 
-            # ── Phase 2: ask Groq how to navigate TO the goal page ─────────
-            JOBS[job_id]["status"] = "planning"
-            nav_plan = await _groq_plan(page_info, description, voiceover, phase="nav")
-            nav_actions = nav_plan.get("actions", [])
-            print(f"[demo] nav plan: {json.dumps(nav_actions)}")
+            plan = await _groq_plan(page_info, description, voiceover)
+            actions = plan.get("actions", [])
+            captions = plan.get("caption_segments", [])
+            print(f"[demo] plan ({len(actions)} actions): {json.dumps(actions)}")
+
             JOBS[job_id]["status"] = "recording"
-
-            await _execute_actions(page, nav_actions, frames_dir, frame_state)
-
-            # ── Phase 3: re-read DOM on current page ──────────────────────
-            current_url = page.url
-            page_info2 = await _extract_page_info(page)
-            print(f"[demo] after nav, URL={current_url}, "
-                  f"buttons={len(page_info2.get('buttons',[]))}")
-
-            # ── Phase 4: ask Groq for interactions on this page ────────────
-            JOBS[job_id]["status"] = "planning"
-            interact_plan = await _groq_plan(page_info2, description, voiceover, phase="interact")
-            interact_actions = interact_plan.get("actions", [])
-            captions = interact_plan.get("caption_segments", [])
-            print(f"[demo] interact plan: {json.dumps(interact_actions)}")
-            JOBS[job_id]["status"] = "recording"
-
-            await _execute_actions(page, interact_actions, frames_dir, frame_state)
+            await _execute_actions(page, actions, frames_dir, frame_state)
 
             await browser.close()
 
