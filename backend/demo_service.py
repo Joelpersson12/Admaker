@@ -18,7 +18,6 @@ _STEALTH_UA = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Injected before every page load — hides Playwright/webdriver fingerprint
 _STEALTH_JS = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
@@ -46,46 +45,90 @@ async def _tts(text: str, path: str, voice: str = "en-US-GuyNeural") -> bool:
         return False
 
 
-async def _plan_actions(url: str, description: str, voiceover: str) -> dict:
+async def _extract_page_info(page) -> dict:
+    """Read the live DOM to give Groq real element data to work with."""
+    try:
+        return await page.evaluate("""() => {
+            const text = t => (t || '').trim().replace(/\\s+/g, ' ').slice(0, 60);
+
+            const buttons = Array.from(document.querySelectorAll(
+                'button, [role="button"], input[type="button"], input[type="submit"]'
+            )).slice(0, 20).map(el => ({
+                text: text(el.innerText || el.value),
+                id: el.id || null,
+                cls: el.className ? el.className.toString().slice(0, 60) : null,
+            })).filter(b => b.text);
+
+            const links = Array.from(document.querySelectorAll('a[href]'))
+                .slice(0, 20)
+                .map(el => ({ text: text(el.innerText), href: el.href }))
+                .filter(l => l.text);
+
+            const inputs = Array.from(document.querySelectorAll(
+                'input[placeholder], textarea[placeholder], input[type="text"], textarea'
+            )).slice(0, 10).map(el => ({
+                placeholder: el.placeholder || '',
+                id: el.id || null,
+                name: el.name || null,
+            }));
+
+            const headings = Array.from(document.querySelectorAll('h1, h2, h3'))
+                .slice(0, 6).map(el => text(el.innerText));
+
+            return {
+                url: window.location.href,
+                title: document.title,
+                headings,
+                buttons,
+                links,
+                inputs,
+            };
+        }""")
+    except Exception as e:
+        print(f"[demo] DOM extract failed: {e}")
+        return {}
+
+
+async def _plan_actions(page_info: dict, description: str, voiceover: str) -> dict:
     from groq import Groq
 
     client = Groq(api_key=os.getenv("GROQ_API_KEY", ""))
 
+    page_summary = json.dumps(page_info, indent=2)
+
     prompt = f"""You are generating a Playwright browser automation script for a screen recording demo video.
 Return ONLY valid JSON.
 
-Website URL: {url}
+The browser has already loaded the page. Here is what is ACTUALLY on the page right now:
+{page_summary}
+
 What to demonstrate: {description}
 Voiceover script: {voiceover}
 
 Return a JSON object with:
-- "actions": array of step objects
+- "actions": array of step objects (do NOT include a navigate to the start URL — browser is already there)
 - "caption_segments": array of {{text, start_ms, duration_ms}}
 
 Supported action types:
-  {{"type":"navigate","url":"...","wait_ms":3000}}
   {{"type":"wait","wait_ms":2000}}
   {{"type":"wait_for","selector":"css-selector","wait_ms":2000}}
+  {{"type":"navigate","url":"...","wait_ms":3000}}
   {{"type":"scroll","y":400,"wait_ms":1200}}
   {{"type":"scroll_to_bottom","wait_ms":1000}}
-  {{"type":"click_text","text":"...","wait_ms":2000}}
-  {{"type":"click_role","role":"button","name":"...","wait_ms":2000}}
+  {{"type":"click_text","text":"EXACT text from the button/link list above","wait_ms":2000}}
   {{"type":"click_selector","selector":"css-selector","wait_ms":2000}}
-  {{"type":"fill_placeholder","placeholder":"...","value":"...","wait_ms":800}}
-  {{"type":"fill_label","label":"...","value":"...","wait_ms":800}}
+  {{"type":"fill_placeholder","placeholder":"exact placeholder text","value":"...","wait_ms":800}}
   {{"type":"fill_selector","selector":"css-selector","value":"...","wait_ms":800}}
-  {{"type":"press","key":"Enter","wait_ms":3000}}
-  {{"type":"hover","selector":"css-selector","wait_ms":800}}
+  {{"type":"press","key":"Enter","wait_ms":2000}}
 
 Rules:
-- Always start with navigate
-- After navigate use wait_ms 2500 to let SPAs hydrate (never more than 3000 for navigate)
-- For SPAs (React/Vue/Next.js): use wait_for with a selector that appears after load, wait_ms 2000
-- wait_ms for page loads: max 3000. For AI generation waits: max 5000. For clicks/fills: 1500-2000.
-- Keep the TOTAL sum of all wait_ms values under 45000 (45 seconds) — this is a hard limit
-- Maximum 12 actions total
-- caption_segments start at 0ms, align with voiceover pacing
-- Keep total video under 50 seconds"""
+- Use EXACT button/link text from the page data above for click_text actions
+- If a button has an id or class in the data, prefer click_selector with #id or .classname
+- For hash-route navigation (e.g. /#builder), use {{"type":"navigate","url":"https://example.com/#builder"}}
+- After any navigation or click that changes the page, use wait_ms 2500-3000
+- Total sum of all wait_ms must be under 45000ms
+- Maximum 14 actions
+- caption_segments start at 0ms"""
 
     resp = await asyncio.to_thread(
         client.chat.completions.create,
@@ -98,45 +141,41 @@ Rules:
 
 
 async def _safe_navigate(page, url: str) -> None:
-    """Load page: domcontentloaded first, then wait briefly for SPA hydration."""
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=25000)
     except Exception as e:
         raise RuntimeError(f"Could not load {url}: {e}") from e
-    # Give SPA frameworks (React/Vue/Next) time to mount without blocking on networkidle
     try:
-        await page.wait_for_load_state("networkidle", timeout=6000)
+        await page.wait_for_load_state("networkidle", timeout=5000)
     except Exception:
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(2.0)
 
 
 async def _safe_click(page, action: dict) -> None:
-    """Try multiple click strategies before giving up."""
     text = action.get("text", "")
     name = action.get("name", "")
     role = action.get("role", "button")
     selector = action.get("selector", "")
     t = action["type"]
-    timeout = 8000
+    TO = 6000
 
     errors = []
 
     if t == "click_text":
         strategies = [
-            lambda: page.get_by_text(text, exact=True).first.click(timeout=timeout),
-            lambda: page.get_by_text(text, exact=False).first.click(timeout=timeout),
-            lambda: page.locator(f"text={text}").first.click(timeout=timeout),
+            lambda: page.get_by_text(text, exact=True).first.click(timeout=TO),
+            lambda: page.get_by_text(text, exact=False).first.click(timeout=TO),
+            lambda: page.locator(f"text={text}").first.click(timeout=TO),
         ]
     elif t == "click_role":
         strategies = [
-            lambda: page.get_by_role(role, name=name).first.click(timeout=timeout),
-            lambda: page.get_by_role(role).filter(has_text=name).first.click(timeout=timeout),
-            lambda: page.locator(f"[role='{role}']", has_text=name).first.click(timeout=timeout),
+            lambda: page.get_by_role(role, name=name).first.click(timeout=TO),
+            lambda: page.get_by_role(role).filter(has_text=name).first.click(timeout=TO),
         ]
     elif t == "click_selector":
         strategies = [
-            lambda: page.locator(selector).first.click(timeout=timeout),
-            lambda: page.locator(selector).nth(0).click(timeout=timeout, force=True),
+            lambda: page.locator(selector).first.click(timeout=TO),
+            lambda: page.locator(selector).nth(0).click(timeout=TO, force=True),
         ]
     else:
         return
@@ -148,21 +187,26 @@ async def _safe_click(page, action: dict) -> None:
         except Exception as e:
             errors.append(str(e))
 
-    # Last resort: JS click on the first matching element
+    # JS click fallback
     try:
         if t == "click_text" and text:
             await page.evaluate(
                 f"""() => {{
-                    const el = Array.from(document.querySelectorAll('*'))
+                    const el = Array.from(document.querySelectorAll('button,a,[role=button]'))
                         .find(e => e.textContent.trim().includes({json.dumps(text)}));
                     if (el) el.click();
                 }}"""
             )
             return
+        elif t == "click_selector" and selector:
+            await page.evaluate(
+                f"""() => {{ const el = document.querySelector({json.dumps(selector)}); if (el) el.click(); }}"""
+            )
+            return
     except Exception as e:
-        errors.append(f"js-click: {e}")
+        errors.append(f"js: {e}")
 
-    print(f"[demo] click failed after all strategies: {errors[-1]}")
+    print(f"[demo] click failed: {errors[-1] if errors else 'unknown'}")
 
 
 async def _safe_fill(page, action: dict) -> None:
@@ -171,7 +215,7 @@ async def _safe_fill(page, action: dict) -> None:
     selector = action.get("selector", "")
     value = action.get("value", "")
     t = action["type"]
-    TO = 6000  # hard 6-second cap on every fill attempt
+    TO = 6000
 
     try:
         if t == "fill_placeholder":
@@ -193,7 +237,7 @@ async def _safe_fill(page, action: dict) -> None:
 
 
 async def _record(page, frames_dir: Path, duration_ms: int, frame_state: list) -> None:
-    interval = 0.1  # 10 fps
+    interval = 0.1
     count = max(1, int(duration_ms / 1000 * 10))
     for _ in range(count):
         idx = frame_state[0]
@@ -210,10 +254,10 @@ async def _run_recording(job_id: str, url: str, description: str, voiceover: str
     task = asyncio.create_task(_do_recording(job_id, url, description, voiceover))
 
     async def _watchdog() -> None:
-        await asyncio.sleep(300)  # 5-minute hard cap
+        await asyncio.sleep(300)
         if JOBS.get(job_id, {}).get("status") not in ("done", "error"):
             task.cancel()
-            JOBS[job_id].update({"status": "error", "error": "Timed out after 5 minutes — the site may be too complex or unreachable"})
+            JOBS[job_id].update({"status": "error", "error": "Timed out after 5 minutes"})
 
     watchdog = asyncio.create_task(_watchdog())
     try:
@@ -233,15 +277,9 @@ async def _do_recording(job_id: str, url: str, description: str, voiceover: str)
     frames_dir = out / "frames"
     frames_dir.mkdir(exist_ok=True)
 
+    from playwright.async_api import async_playwright  # type: ignore
+
     try:
-        plan = await _plan_actions(url, description, voiceover)
-        actions = plan.get("actions", [])
-        captions = plan.get("caption_segments", [])
-        JOBS[job_id]["status"] = "recording"
-
-        from playwright.async_api import async_playwright  # type: ignore
-        frame_state = [0]
-
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 args=[
@@ -263,26 +301,40 @@ async def _do_recording(job_id: str, url: str, description: str, voiceover: str)
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 },
             )
-            # Hide webdriver fingerprint on every new page
             await ctx.add_init_script(_STEALTH_JS)
             page = await ctx.new_page()
-            # Global cap: every Playwright op times out at 8s unless overridden
             page.set_default_timeout(8000)
             page.set_default_navigation_timeout(25000)
 
+            # Step 1: navigate and read the real DOM
+            await _safe_navigate(page, url)
+            page_info = await _extract_page_info(page)
+            print(f"[demo] page info: {json.dumps(page_info)[:500]}")
+
+            # Step 2: plan with real DOM context
+            plan = await _plan_actions(page_info, description, voiceover)
+            actions = plan.get("actions", [])
+            captions = plan.get("caption_segments", [])
+            print(f"[demo] plan: {len(actions)} actions")
+
+            JOBS[job_id]["status"] = "recording"
+            frame_state = [0]
+
+            # Record homepage while it's loaded (2s)
+            await _record(page, frames_dir, 2000, frame_state)
+
+            # Step 3: execute actions
             for action in actions:
-                # Cap wait_ms so no single action can record for more than 6s
                 wait_ms = min(action.get("wait_ms", 1000), 6000)
                 try:
                     t = action["type"]
                     if t == "navigate":
                         await _safe_navigate(page, action["url"])
                     elif t == "wait":
-                        pass  # wait_ms handled by _record below
+                        pass
                     elif t == "wait_for":
-                        sel = action.get("selector", "body")
                         try:
-                            await page.wait_for_selector(sel, timeout=6000)
+                            await page.wait_for_selector(action.get("selector", "body"), timeout=6000)
                         except Exception:
                             pass
                     elif t == "scroll":
@@ -296,9 +348,8 @@ async def _do_recording(job_id: str, url: str, description: str, voiceover: str)
                     elif t == "press":
                         await page.keyboard.press(action.get("key", "Enter"))
                     elif t == "hover":
-                        sel = action.get("selector", "body")
                         try:
-                            await page.locator(sel).first.hover(timeout=5000)
+                            await page.locator(action.get("selector", "body")).first.hover(timeout=4000)
                         except Exception:
                             pass
                 except Exception as e:
