@@ -97,7 +97,7 @@ async def _groq_plan(page_info: dict, description: str, voiceover: str) -> dict:
     prompt = f"""You are generating a Playwright browser automation script for a screen recording demo video.
 Return ONLY valid JSON.
 
-The browser has already loaded the starting page. Here is the REAL DOM data right now:
+The browser is a MOBILE viewport (390x844, iPhone-sized) and has already loaded the starting page. Here is the REAL DOM data right now:
 {page_summary}
 
 Goal: {description}
@@ -242,8 +242,11 @@ async def _safe_fill(page, action: dict) -> None:
         print(f"[demo] fill failed: {e}")
 
 
+_FPS = 24
+
 async def _record(page, frames_dir: Path, duration_ms: int, frame_state: list) -> None:
-    count = max(1, int(duration_ms / 1000 * 10))
+    interval = 1 / _FPS
+    count = max(1, int(duration_ms / 1000 * _FPS))
     for _ in range(count):
         idx = frame_state[0]
         try:
@@ -252,7 +255,7 @@ async def _record(page, frames_dir: Path, duration_ms: int, frame_state: list) -
         except Exception:
             pass
         frame_state[0] += 1
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(interval)
 
 
 async def _execute_actions(page, actions: list, frames_dir: Path, frame_state: list) -> None:
@@ -331,11 +334,14 @@ async def _do_recording(job_id: str, url: str, description: str, voiceover: str)
                     "--disable-setuid-sandbox",
                     "--disable-blink-features=AutomationControlled",
                     "--disable-infobars",
-                    "--window-size=1280,720",
+                    "--window-size=390,844",
                 ]
             )
             ctx = await browser.new_context(
-                viewport={"width": 1280, "height": 720},
+                viewport={"width": 390, "height": 844},
+                device_scale_factor=2,
+                is_mobile=True,
+                has_touch=True,
                 user_agent=_STEALTH_UA,
                 locale="en-US",
                 timezone_id="America/New_York",
@@ -388,24 +394,30 @@ async def _do_recording(job_id: str, url: str, description: str, voiceover: str)
 
         raw = out / "raw.mp4"
         subprocess.run(
-            ["ffmpeg", "-y", "-framerate", "10",
+            ["ffmpeg", "-y", "-framerate", str(_FPS),
              "-i", str(frames_dir / "frame_%06d.png"),
-             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(raw)],
+             # Scale 390x1688 (retina 2x) → 1080x1920, pad if needed
+             "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,"
+                    "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", str(raw)],
             check=True, capture_output=True
         )
 
         final = out / "final.mp4"
-        # Escape srt path for ffmpeg filter (colons and backslashes must be escaped)
         srt_escaped = str(srt_path).replace("\\", "\\\\").replace(":", "\\:")
-        vf = (
-            f"subtitles={srt_escaped}:force_style='"
-            "Fontsize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-            "BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=30'"
+        # Large bold yellow captions — classic Reels style
+        caption_style = (
+            "Fontsize=52,Bold=1,"
+            "PrimaryColour=&H00FFFF00,"   # yellow
+            "OutlineColour=&H00000000,"   # black outline
+            "BorderStyle=1,Outline=3,Shadow=1,"
+            "Alignment=2,MarginV=120"     # centered-bottom with breathing room
         )
+        vf = f"subtitles={srt_escaped}:force_style='{caption_style}'"
         cmd = ["ffmpeg", "-y", "-i", str(raw)]
         if has_audio:
-            cmd += ["-i", str(audio_path), "-c:a", "aac", "-shortest"]
-        cmd += ["-vf", vf, "-c:v", "libx264", str(final)]
+            cmd += ["-i", str(audio_path), "-c:a", "aac", "-b:a", "192k", "-shortest"]
+        cmd += ["-vf", vf, "-c:v", "libx264", "-crf", "18", "-preset", "fast", str(final)]
         subprocess.run(cmd, check=True, capture_output=True)
 
         JOBS[job_id].update({"status": "done", "video_path": str(final)})
