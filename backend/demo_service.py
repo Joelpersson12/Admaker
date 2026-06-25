@@ -169,22 +169,23 @@ async def _safe_fill(page, action: dict) -> None:
     selector = action.get("selector", "")
     value = action.get("value", "")
     t = action["type"]
-    timeout = 6000
+    TO = 6000  # hard 6-second cap on every fill attempt
 
     try:
         if t == "fill_placeholder":
             try:
-                await page.get_by_placeholder(placeholder).fill(value)
+                await page.get_by_placeholder(placeholder).fill(value, timeout=TO)
             except Exception:
-                # Partial match fallback
-                await page.locator(f"[placeholder*='{placeholder[:20]}']").first.fill(value)
+                await page.locator(f"[placeholder*='{placeholder[:20]}']").first.fill(value, timeout=TO)
         elif t == "fill_label":
             try:
-                await page.get_by_label(label).fill(value)
+                await page.get_by_label(label).fill(value, timeout=TO)
             except Exception:
-                await page.locator(f"label:has-text('{label}') + input, label:has-text('{label}') ~ input").first.fill(value)
+                await page.locator(
+                    f"label:has-text('{label}') + input, label:has-text('{label}') ~ input"
+                ).first.fill(value, timeout=TO)
         elif t == "fill_selector":
-            await page.locator(selector).first.fill(value)
+            await page.locator(selector).first.fill(value, timeout=TO)
     except Exception as e:
         print(f"[demo] fill failed: {e}")
 
