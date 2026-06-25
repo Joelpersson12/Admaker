@@ -78,12 +78,13 @@ Supported action types:
 
 Rules:
 - Always start with navigate
-- After navigate use wait_ms 3000+ to let SPAs fully hydrate
-- For SPAs (React/Vue/Next.js): prefer wait_for with a selector that appears after load
-- Use generous wait_ms for page loads (3000+) and AI generation (8000+)
-- If clicking might fail by text, also include a click_selector fallback step
+- After navigate use wait_ms 2500 to let SPAs hydrate (never more than 3000 for navigate)
+- For SPAs (React/Vue/Next.js): use wait_for with a selector that appears after load, wait_ms 2000
+- wait_ms for page loads: max 3000. For AI generation waits: max 5000. For clicks/fills: 1500-2000.
+- Keep the TOTAL sum of all wait_ms values under 45000 (45 seconds) — this is a hard limit
+- Maximum 12 actions total
 - caption_segments start at 0ms, align with voiceover pacing
-- Keep total under 90 seconds"""
+- Keep total video under 50 seconds"""
 
     resp = await asyncio.to_thread(
         client.chat.completions.create,
@@ -269,8 +270,8 @@ async def _do_recording(job_id: str, url: str, description: str, voiceover: str)
             page.set_default_navigation_timeout(25000)
 
             for action in actions:
-                # Cap wait_ms so no single action can record for more than 12s
-                wait_ms = min(action.get("wait_ms", 1000), 12000)
+                # Cap wait_ms so no single action can record for more than 6s
+                wait_ms = min(action.get("wait_ms", 1000), 6000)
                 try:
                     t = action["type"]
                     if t == "navigate":
