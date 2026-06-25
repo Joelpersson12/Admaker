@@ -124,8 +124,8 @@ Rules:
 - Prefer click_selector with #id when element has an id
 - For hash routes use navigate with full URL (e.g. https://example.com/#builder)
 - After navigation or clicks that change page, use wait_ms 2500
-- Total sum of all wait_ms: max 40000ms (40 seconds)
-- Maximum 10 actions total
+- Total sum of all wait_ms: max 18000ms (18 seconds) — hard limit
+- Maximum 8 actions total
 - caption_segments start at 0ms"""
 
     # 30-second hard timeout on the Groq API call
@@ -242,7 +242,7 @@ async def _safe_fill(page, action: dict) -> None:
         print(f"[demo] fill failed: {e}")
 
 
-_FPS = 24
+_FPS = 12
 
 async def _record(page, frames_dir: Path, duration_ms: int, frame_state: list) -> None:
     interval = 1 / _FPS
@@ -260,7 +260,7 @@ async def _record(page, frames_dir: Path, duration_ms: int, frame_state: list) -
 
 async def _execute_actions(page, actions: list, frames_dir: Path, frame_state: list) -> None:
     for action in actions:
-        wait_ms = min(action.get("wait_ms", 1000), 6000)
+        wait_ms = min(action.get("wait_ms", 1000), 3000)
         try:
             t = action["type"]
             if t == "navigate":
@@ -297,12 +297,12 @@ async def _run_recording(job_id: str, url: str, description: str, voiceover: str
     task = asyncio.create_task(_do_recording(job_id, url, description, voiceover))
 
     async def _watchdog() -> None:
-        await asyncio.sleep(300)
+        await asyncio.sleep(150)
         if JOBS.get(job_id, {}).get("status") not in ("done", "error"):
             task.cancel()
             JOBS[job_id].update({
                 "status": "error",
-                "error": "Timed out after 5 minutes — try a simpler description or fewer steps",
+                "error": "Timed out after 2.5 minutes — try a simpler description or fewer steps",
             })
 
     watchdog = asyncio.create_task(_watchdog())
@@ -339,7 +339,6 @@ async def _do_recording(job_id: str, url: str, description: str, voiceover: str)
             )
             ctx = await browser.new_context(
                 viewport={"width": 390, "height": 844},
-                device_scale_factor=2,
                 is_mobile=True,
                 has_touch=True,
                 user_agent=_STEALTH_UA,
@@ -364,7 +363,7 @@ async def _do_recording(job_id: str, url: str, description: str, voiceover: str)
                   f"{len(page_info.get('links',[]))} links, url={page.url}")
 
             # Record homepage briefly while planning
-            await _record(page, frames_dir, 1500, frame_state)
+            await _record(page, frames_dir, 800, frame_state)
 
             plan = await _groq_plan(page_info, description, voiceover)
             actions = plan.get("actions", [])
